@@ -1,6 +1,6 @@
 ---
 title: "Weather Analysis"
-author: "Group2"
+author: "Peter Kováč"
 date: "11/11/2021"
 output: html_document
 toc: true
