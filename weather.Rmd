@@ -1,0 +1,325 @@
+---
+title: "Weather Analysis"
+author: "Group2"
+date: "11/11/2021"
+output: html_document
+toc: true
+toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+packages = c("corrplot", "zoo",
+             "xts", "rpart", "rpart.plot", "caret", "MASS", "leaps", "randomForest", "caret")
+package.check <- lapply(
+  packages,
+  FUN = function(x) {
+    if (!require(x, character.only = TRUE)) {
+      install.packages(x, dependencies = TRUE)
+      library(x, character.only = TRUE)
+    }
+  }
+)
+```
+
+# Pre-Processing:
+
+```{r, }
+climate_data <- read.csv("climate_data_renamed.csv")
+names(climate_data)
+```
+
+```{r include =  FALSE}
+sum(climate_data$Maximum_rain_per_minute) # Column filled with 0's
+sum(climate_data$Date != climate_data$Date1) # Column with the same info
+sum(climate_data$diff_pressure != climate_data$Maximum_pressure - climate_data$Minimum_pressure) # Reduntant diff_pressure column
+```
+
+```{r}
+climate_data = climate_data[,-c(11, 21 , 23)] # Removing unnecessary columns
+```
+
+# Data inspection:
+
+```{r}
+summary(climate_data)
+str(climate_data)
+```
+
+## Moving average and time-shifting
+
+```{r}
+climate_data$Average_temperature_3PMA <- rollmean(climate_data$Average_temperature, k = 3, fill = NA, align= 'right')
+climate_data$Average_dewpoint_3PMA <- rollmean(climate_data$Average_dewpoint, k = 3, fill = NA, align= 'right')
+climate_data$Average_temperature_Time_shifted <- append(climate_data$Average_temperature[2:length(climate_data$Average_temperature)+1],NA,0)
+head(climate_data)
+```
+
+```{r}
+# Remove NAs
+climate_data <- na.omit(climate_data)
+```
+
+## Correlation in the data:
+
+```{r}
+corrplot(cor(climate_data[,-1]))
+```
+
+## Correlation in the data after splitting it into subsets
+
+```{r}
+average_climate_data = climate_data[,c(1:8,21:23)] # Average data
+minmax_climate_data = climate_data[, c(1,11:19)] # Minimum and Maximum data
+```
+
+```{r}
+corrplot(cor(average_climate_data[,-1]))
+```
+
+```{r}
+corrplot(cor(minmax_climate_data[,-1]))
+```
+
+## Exploratory data analysis with the timeshited data and moving averages
+
+```{r}
+plot(Average_temperature ~ Month, data = climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_humidity, data = average_climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_dewpoint, data = average_climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_barometer, data = average_climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_windspeed, data = average_climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_gustspeed, data = average_climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_direction, data = average_climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_temperature_3PMA, data = average_climate_data)
+```
+
+```{r}
+plot(Average_temperature_Time_shifted ~ Average_dewpoint_3PMA, data = average_climate_data)
+```
+Based on these scatterplots we would expect that that the moving averages to be the best predictors, as there is a clear positive correlation between these values and the timeshifted temperature visually speaking. The other scatterplots do not reveal such a clear relationship, though they might still have some predictive power.
+
+```{r}
+moving_average_temp_xts <- xts(average_climate_data$Average_temperature_3PMA, order.by=as.Date(as.character(average_climate_data$Date), format="%Y-%m-%d"))
+plot(moving_average_temp_xts, main = "Moving Average Temperature")
+```
+
+```{r}
+moving_average_dew_xts <- xts(average_climate_data$Average_dewpoint_3PMA, order.by=as.Date(as.character(average_climate_data$Date), format="%Y-%m-%d"))
+plot(moving_average_dew_xts)
+```
+
+Looking at the moving averages of the dewpoint and the temperature, we can clearly see the cyclicality of the two variable, which does not come surprising due to the seasonality of weather in Colorado.
+
+
+# Cross-Validation - Splitting the data 
+
+Note: We can either split the dataset prior to analysis - here we simply split the data into a train/test sample (90/10).
+```{r}
+# Without any packages:
+set.seed(2102) 
+shuffled_cd<-climate_data[sample(nrow(climate_data)),] # Shuffling the data
+folds <- cut(seq(1,nrow(shuffled_cd)),breaks=10,labels=FALSE) # k=10 folds
+# For loop for cross validation and creating train and test sets:
+for(i in 1:10){
+  testIndexes <- which(folds==i,arr.ind=TRUE)
+  test_climate_data <- shuffled_cd[testIndexes, ]
+  train_climate_data <- shuffled_cd[-testIndexes, ]
+}
+```
+
+# Linear Regression Analysis
+```{r}
+library(caret)
+# Define training control
+train.control <- trainControl(method = "cv", number = 10,  savePredictions = TRUE)
+```
+
+```{r}
+model <- train(Average_temperature_Time_shifted ~ . - Date, data = train_climate_data, method = "lm",
+               trControl = train.control)
+print(model)
+summary(model)
+model_final <- model$finalModel
+```
+
+### Stepwise Regression:
+```{r}
+garbage <- capture.output(model1 <- train(Average_temperature_Time_shifted ~ . - Date, data = train_climate_data, method = "lmStepAIC", trControl = train.control, direction = "both"))
+model1_final <- model1$finalModel
+summary(model1)
+```
+
+```{r}
+par(mfrow=c(1,2))
+plot(model1_final, 1) # Residuals do not depend on the fitted values
+plot(model1_final, 4)
+par(mfrow=c(1,1))
+```
+
+```{r}
+model1$results
+```
+
+Anova:
+```{r}
+model1_final$anova
+```
+
+```{r}
+yhat_step <- predict(model1_final, newdata = test_climate_data) # predictions
+yhat_full <- predict(model_final, newdata = test_climate_data) # predictions
+
+sqrt(c(mean((yhat_step - test_climate_data$Average_temperature_Time_shifted)^2), mean((yhat_full - test_climate_data$Average_temperature_Time_shifted)^2))) ## root mean squared error
+```
+
+
+
+# Regression Trees
+## With CARET:
+
+```{r}
+train.control <- trainControl(method = "cv", number = 10, savePredictions = "final")
+modeltree1 <- train(Average_temperature_Time_shifted ~ . -Date, data = train_climate_data, method = "rpart", trControl = train.control)
+print(modeltree1)
+rt_caret <- modeltree1$finalModel
+```
+
+```{r}
+rpart.plot(rt_caret)
+```
+
+```{r}
+train.control <- trainControl(method = "cv", number = 10, savePredictions = "final")
+modeltree2 <- train(Average_temperature_Time_shifted ~ . -Date, data = train_climate_data, method = "rpart", trControl = train.control, tuneLength = 20)
+print(modeltree2)
+rt_caret_final <- modeltree2$finalModel
+```
+
+```{r}
+print(modeltree2)
+```
+
+```{r}
+rpart.plot(rt_caret_final)
+```
+
+
+```{r}
+yhat <- predict(rt_caret, test_climate_data[2:23]) # predictions
+yhat_pruned <- predict(rt_caret_final, test_climate_data[2:23]) # predictions
+
+sqrt(c(mean((yhat - test_climate_data$Average_temperature_Time_shifted)^2), mean((yhat_pruned - test_climate_data$Average_temperature_Time_shifted)^2))) ## root mean squared error
+```
+
+# Random forest
+
+```{r}
+rf <- randomForest(Average_temperature_Time_shifted ~ . - Date, 
+                    data = train_climate_data,
+                    importance = TRUE,
+                    mtry = 4) # Number of variables for each split
+```
+
+Model call:
+```{r}
+rf
+```
+
+Importance of the variables:
+```{r}
+importance(rf)
+```
+
+Varying importance plot:
+```{r}
+varImpPlot(rf)
+```
+
+```{r}
+# RMSE of random forest
+yhat_rf <- predict(rf, test_climate_data)
+sqrt(mean((yhat_rf - test_climate_data$Average_temperature_Time_shifted)^2))
+```
+
+# Comparison of models - train/test split:
+```{r}
+RMSE_test <- data.frame("Multiple Regression" = sqrt(mean((yhat_full - test_climate_data$Average_temperature_Time_shifted)^2)), "Stepwise Regression" = sqrt(mean((yhat_step - test_climate_data$Average_temperature_Time_shifted)^2)), "Regression Tree" = sqrt(mean((yhat_pruned - test_climate_data$Average_temperature_Time_shifted)^2)), "Random Forest" = sqrt(mean((yhat_rf - test_climate_data$Average_temperature_Time_shifted)^2)))
+
+RMSE_test
+```
+
+# Comparison of models - within sample
+```{r}
+#regression
+lm_in <- train(Average_temperature_Time_shifted ~ .,
+                 data = climate_data[2:23], 
+                 method = "lm", 
+                 trControl = train.control)
+
+garbage <- capture.output(lm_in_step <- train(Average_temperature_Time_shifted ~ .,
+                 data = climate_data[2:23], 
+                 method = "lmStepAIC", 
+                 trControl = train.control))
+
+#regression tree
+rpart_in <- train(Average_temperature_Time_shifted ~ .,
+                 data = climate_data[2:23], 
+                 method = "rpart", 
+                 trControl = train.control)
+
+#random forest
+rf_in <- train(Average_temperature_Time_shifted ~ .,
+                 data = climate_data[2:23], 
+                 method = "rf", 
+                tuneGrid = data.frame(mtry = 4),
+                 trControl = train.control)
+```
+
+```{r}
+lm_in
+```
+
+```{r}
+lm_in_step
+```
+
+```{r}
+rpart_in
+```
+
+```{r}
+rf_in
+```
+
+```{r}
+RMSE_in_sample = data.frame("Multiple Regression" = lm_in$results$RMSE, "Stepwise Regression" = lm_in_step$results$RMSE,"Regression Tree" = rpart_in$results$RMSE, "Random Forest" = rf_in$results$RMSE)
+
+RMSE_in_sample = RMSE_in_sample[1,]
+```
+
+```{r}
+RMSE_result = rbind(RMSE_test, RMSE_in_sample)
+RMSE_rounded = round(RMSE_result, 3)
+```
